@@ -128,7 +128,7 @@ async function fetchDouyin() {
         title: v.word || v.title || '',
         url: 'https://www.douyin.com/hot/' + (v.sentence_id || v.group_id || ''),
         author: '',
-        cover: '',
+        cover: (v.word_cover && Array.isArray(v.word_cover.url_list) && v.word_cover.url_list[0]) || '',
         views: v.hot_value || 0,
         likes: 0,
         pubDate: Date.parse(v.event_time || '') || 0,
