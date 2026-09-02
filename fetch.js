@@ -18,6 +18,9 @@ const CHANNELS = [
   '数字人', 'Sora', 'AI 音乐', 'ComfyUI',
 ];
 
+/* 全部内容只保留近 7 天：保证看到的是当下最热，不是陈年热点 */
+const FRESH_DAYS = 7;
+
 const safeName = (kw) => kw.replace(/[\\/:*?"<>|#%&{}$!'@+`=\r\n]+/g, ' ').trim();
 
 function save(relPath, data) {
@@ -157,7 +160,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   /* 模式二：按需搜索任意关键词（repository_dispatch 触发） */
   if (si !== -1 && argv[si + 1]) {
     const kw = safeName(String(argv[si + 1]).slice(0, 30));
-    const items = await biliSearch(headers, kw, 30, null);
+    const items = await biliSearch(headers, kw, FRESH_DAYS, null);
     if (items.length) {
       save('search/' + kw + '.json', { platform: 'bilibili', kw, items, fetchedAt: Date.now() });
       return;
@@ -173,7 +176,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const seen = new Set();
   const all = [];
   for (const kw of AI_SEARCH_KW) {
-    const items = await biliSearch(headers, kw, 7, AI_TITLE_RE);
+    const items = await biliSearch(headers, kw, FRESH_DAYS, AI_TITLE_RE);
     for (const it of items) {
       if (seen.has(it.url)) continue;
       seen.add(it.url);
@@ -188,10 +191,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   if (bili) save('bilibili.json', { platform: 'bilibili', items: bili, fetchedAt: Date.now() });
 
-  // 2. AI 细分频道预抓（30 天内，宽松过滤：频道词已足够定向）
+  // 2. AI 细分频道预抓（近 7 天，宽松过滤：频道词已足够定向）
   for (const ch of CHANNELS) {
     await sleep(1500); // 礼貌间隔，降低风控风险
-    const items = await biliSearch(headers, ch, 30, null);
+    const items = await biliSearch(headers, ch, FRESH_DAYS, null);
     if (items.length) save('search/' + ch + '.json', { platform: 'bilibili', kw: ch, items, fetchedAt: Date.now() });
   }
   save('channels.json', { channels: CHANNELS, fetchedAt: Date.now() });
