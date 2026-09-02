@@ -6,6 +6,8 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+  repository_dispatch:
+    types: [search]
 
 permissions:
   contents: write
@@ -13,13 +15,18 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node fetch.js
+      - name: Run fetch (scheduled or manual)
+        if: github.event_name != 'repository_dispatch'
+        run: node fetch.js
+      - name: Run search (on-demand)
+        if: github.event_name == 'repository_dispatch'
+        run: node fetch.js --search "${{ github.event.client_payload.q }}"
       - name: Commit data
         run: |
           git config user.name "hot-bot"
