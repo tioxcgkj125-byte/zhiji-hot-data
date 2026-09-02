@@ -1,0 +1,29 @@
+name: fetch-hot
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node fetch.js
+      - name: Commit data
+        run: |
+          git config user.name "hot-bot"
+          git config user.email "actions@github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "update hot data $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          git push
