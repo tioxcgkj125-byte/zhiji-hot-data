@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const dbg = []; // 运行诊断日志，写入 data/debug.json
 
 /* AI 综合榜：搜索关键词 + 标题严格过滤 */
 const AI_SEARCH_KW = ['AI', '人工智能', '大模型'];
@@ -140,8 +141,8 @@ async function fetchDouyin() {
         pubDate: Date.parse(v.event_time || '') || 0,
       })).filter((v) => v.title);
     }
-    console.log('douyin bad response: ' + JSON.stringify(d).slice(0, 200));
-  } catch (e) { console.log('douyin error: ' + String(e)); }
+    dbg.push('douyin bad response: ' + JSON.stringify(d).slice(0, 200));
+  } catch (e) { dbg.push('douyin error: ' + String(e)); }
   return null;
 }
 
@@ -158,7 +159,9 @@ async function fetchXiaohongshu() {
     const r = await fetch('https://60s.viki.moe/v2/rednote', {
       headers: { 'User-Agent': UA, Accept: 'application/json' },
     });
-    const d = await r.json();
+    const body = await r.text();
+    dbg.push('xhs http ' + r.status + ' ct=' + (r.headers.get('content-type') || '') + ' len=' + body.length + ' head=' + body.slice(0, 120));
+    const d = JSON.parse(body);
     const list = d && d.code === 200 && Array.isArray(d.data) ? d.data : [];
     if (list.length) {
       return list.slice(0, 20).map((v, i) => ({
@@ -172,8 +175,8 @@ async function fetchXiaohongshu() {
         pubDate: 0,
       })).filter((v) => v.title && v.url);
     }
-    console.log('xhs empty: ' + JSON.stringify(d).slice(0, 200));
-  } catch (e) { console.log('xhs error: ' + String(e)); }
+    dbg.push('xhs empty list');
+  } catch (e) { dbg.push('xhs error: ' + String(e && e.message || e)); }
   return null;
 }
 
@@ -190,10 +193,10 @@ async function fetchXTimeline(handle) {
       },
     }
   );
-  if (!r.ok) throw new Error('X_' + handle + '_HTTP_' + r.status);
+  if (!r.ok) throw new Error('HTTP_' + r.status + ' len=' + (await r.text()).length);
   const t = await r.text();
   const m = /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/.exec(t);
-  if (!m) throw new Error('X_' + handle + '_NO_DATA');
+  if (!m) throw new Error('NO_NEXT_DATA len=' + t.length);
   const d = JSON.parse(m[1]);
   const entries = (d.props && d.props.pageProps && d.props.pageProps.timeline && d.props.pageProps.timeline.entries) || [];
   const out = [];
@@ -228,7 +231,7 @@ async function fetchX() {
     try {
       const items = await fetchXTimeline(handle);
       all.push(...items);
-    } catch (e) { console.log('x account failed: ' + String(e && e.message || e)); }
+    } catch (e) { dbg.push('x ' + handle + ': ' + String(e && e.message || e)); }
     await sleep(800);
   }
   all.sort((a, b) => b.pubDate - a.pubDate);
@@ -302,6 +305,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 5. X AI 动态（对标账号）
   const x = await fetchX();
   if (x && x.length) save('x.json', { platform: 'x', items: x, fetchedAt: Date.now() });
+
+  save('debug.json', { log: dbg, fetchedAt: Date.now() });
 
   if (!bili) { console.error('BILIBILI FAILED'); process.exit(1); }
 })();
