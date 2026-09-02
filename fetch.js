@@ -1,11 +1,11 @@
 /* 知己工作台热榜抓取脚本（GitHub Actions 定时运行）
-   模式一（默认）：B站 AI 综合榜（严格过滤）+ 抖音热点榜 + 小红书热榜 + X AI 动态 + 预抓 AI 细分频道
-   模式二（按需）：node fetch.js --search "关键词"  ← 由 worker 的 repository_dispatch 触发，搜任意词 */
+   模式一（默认）：B站 AI 综合榜（严格过滤）+ 抖音热点榜 + 预抓 AI 细分频道
+   模式二（按需）：node fetch.js --search "关键词"  ← 由 worker 的 repository_dispatch 触发，搜任意词
+   注：小红书/X 由 Cloudflare Worker 直接抓取（见 zhiji-workbench/worker.js），不经此脚本 */
 const fs = require('fs');
 const path = require('path');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
-const dbg = []; // 运行诊断日志，写入 data/debug.json
 
 /* AI 综合榜：搜索关键词 + 标题严格过滤 */
 const AI_SEARCH_KW = ['AI', '人工智能', '大模型'];
@@ -16,12 +16,6 @@ const CHANNELS = [
   'AI 新闻', 'AI 编程', 'AI 绘画', 'AI 视频', 'AI 工具', 'AI 副业',
   'AI 教程', '大模型', 'ChatGPT', 'DeepSeek', 'Claude', '智能体',
   '数字人', 'Sora', 'AI 音乐', 'ComfyUI',
-];
-
-/* X AI 动态：对标账号（官方号 + 大V + 中文 AI 资讯号） */
-const X_ACCOUNTS = [
-  'OpenAI', 'xai', 'AnthropicAI', 'GoogleDeepMind', 'MistralAI',
-  'karpathy', 'elonmusk', '_akhaliq', 'op7418', 'dotey',
 ];
 
 const safeName = (kw) => kw.replace(/[\\/:*?"<>|#%&{}$!'@+`=\r\n]+/g, ' ').trim();
@@ -141,101 +135,9 @@ async function fetchDouyin() {
         pubDate: Date.parse(v.event_time || '') || 0,
       })).filter((v) => v.title);
     }
-    dbg.push('douyin bad response: ' + JSON.stringify(d).slice(0, 200));
-  } catch (e) { dbg.push('douyin error: ' + String(e)); }
+    console.log('douyin bad response: ' + JSON.stringify(d).slice(0, 200));
+  } catch (e) { console.log('douyin error: ' + String(e)); }
   return null;
-}
-
-/* ---------- 小红书热榜（60s 开源聚合 API，免认证） ---------- */
-function parseScore(s) {
-  const str = String(s || '').trim();
-  const m = /^([\d.]+)\s*(w|万)$/i.exec(str);
-  if (m) return Math.round(parseFloat(m[1]) * 10000);
-  return parseInt(str.replace(/[^\d]/g, ''), 10) || 0;
-}
-
-async function fetchXiaohongshu() {
-  try {
-    const r = await fetch('https://60s.viki.moe/v2/rednote', {
-      headers: { 'User-Agent': UA, Accept: 'application/json' },
-    });
-    const body = await r.text();
-    dbg.push('xhs http ' + r.status + ' ct=' + (r.headers.get('content-type') || '') + ' len=' + body.length + ' head=' + body.slice(0, 120));
-    const d = JSON.parse(body);
-    const list = d && d.code === 200 && Array.isArray(d.data) ? d.data : [];
-    if (list.length) {
-      return list.slice(0, 20).map((v, i) => ({
-        rank: i + 1,
-        title: v.title || '',
-        url: v.link || '',
-        author: '',
-        cover: '',
-        views: parseScore(v.score),
-        likes: 0,
-        pubDate: 0,
-      })).filter((v) => v.title && v.url);
-    }
-    dbg.push('xhs empty list');
-  } catch (e) { dbg.push('xhs error: ' + String(e && e.message || e)); }
-  return null;
-}
-
-/* ---------- X AI 动态（官方 syndication 接口，免登录） ---------- */
-async function fetchXTimeline(handle) {
-  const r = await fetch(
-    'https://syndication.twitter.com/srv/timeline-profile/screen-name/' + encodeURIComponent(handle) + '?showReplies=false',
-    {
-      headers: {
-        'User-Agent': UA,
-        Accept: 'text/html,application/xhtml+xml',
-        Referer: 'https://platform.twitter.com/',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    }
-  );
-  if (!r.ok) throw new Error('HTTP_' + r.status + ' len=' + (await r.text()).length);
-  const t = await r.text();
-  const m = /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/.exec(t);
-  if (!m) throw new Error('NO_NEXT_DATA len=' + t.length);
-  const d = JSON.parse(m[1]);
-  const entries = (d.props && d.props.pageProps && d.props.pageProps.timeline && d.props.pageProps.timeline.entries) || [];
-  const out = [];
-  for (const e of entries) {
-    const tw = e.content && e.content.tweet;
-    if (!tw) continue;
-    const user = tw.user || {};
-    const text = String(tw.full_text || tw.text || '')
-      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-      .replace(/\s+/g, ' ').trim();
-    if (!text) continue;
-    const media = (tw.entities && tw.entities.media) || (tw.extended_entities && tw.extended_entities.media) || [];
-    const cover = media[0] && media[0].media_url_https ? media[0].media_url_https : '';
-    const tid = tw.conversation_id_str || String(e.entry_id || '').replace(/^tweet-/, '');
-    out.push({
-      title: text.length > 160 ? text.slice(0, 160) + '…' : text,
-      url: 'https://x.com/' + (user.screen_name || handle) + '/status/' + tid,
-      author: (user.name || handle) + (user.screen_name ? ' @' + user.screen_name : ''),
-      cover,
-      views: 0,
-      likes: tw.favorite_count || 0,
-      pubDate: Date.parse(tw.created_at || '') || 0,
-    });
-  }
-  return out.slice(0, 3); // 每账号最新 3 条
-}
-
-async function fetchX() {
-  const all = [];
-  for (const handle of X_ACCOUNTS) {
-    try {
-      const items = await fetchXTimeline(handle);
-      all.push(...items);
-    } catch (e) { dbg.push('x ' + handle + ': ' + String(e && e.message || e)); }
-    await sleep(800);
-  }
-  all.sort((a, b) => b.pubDate - a.pubDate);
-  return all.slice(0, 30).map((v, i) => ({ rank: i + 1, ...v }));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -297,16 +199,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 3. 抖音热点榜
   const dy = await fetchDouyin();
   if (dy) save('douyin.json', { platform: 'douyin', items: dy, fetchedAt: Date.now() });
-
-  // 4. 小红书热榜
-  const xhs = await fetchXiaohongshu();
-  if (xhs) save('xiaohongshu.json', { platform: 'xiaohongshu', items: xhs, fetchedAt: Date.now() });
-
-  // 5. X AI 动态（对标账号）
-  const x = await fetchX();
-  if (x && x.length) save('x.json', { platform: 'x', items: x, fetchedAt: Date.now() });
-
-  save('debug.json', { log: dbg, fetchedAt: Date.now() });
 
   if (!bili) { console.error('BILIBILI FAILED'); process.exit(1); }
 })();
