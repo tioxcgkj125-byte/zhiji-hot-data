@@ -1,10 +1,14 @@
 /* 知己工作台热榜抓取脚本（GitHub Actions 定时运行）
-   - B站：官方 API（热门 -> 排行榜兜底），失败退出非 0（保留仓库里的旧数据）
-   - 抖音：热点榜（临时 csrf token），失败只告警，保留旧数据 */
+   - B站：AI 定向搜索（多关键词 + 标题过滤 + 7 天内 + 综合排序），失败回退全站热门
+   - 抖音：全站热点榜（临时 csrf token），失败只告警，保留旧数据 */
 const fs = require('fs');
 const path = require('path');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+/* AI 相关关键词：用于搜索 + 标题严格过滤 */
+const AI_SEARCH_KW = ['AI', '人工智能', '大模型'];
+const AI_TITLE_RE = /\bai\b|(?:人工|机器)智能|大模型|gpt|llm|智能体|agent|deepseek|claude|gemini|openai|chatgpt|机器学习|神经网络|aigc|ai绘画|ai视频|ai修复/i;
 
 function save(name, data) {
   fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
@@ -12,31 +16,65 @@ function save(name, data) {
   console.log('saved ' + name + ': ' + data.items.length + ' items');
 }
 
-/* ---------- B站 ---------- */
-async function fetchBilibili() {
-  let cookie = '';
+async function getBiliCookie() {
   try {
     const r = await fetch('https://api.bilibili.com/x/frontend/finger/spi', {
       headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' },
     });
     const d = await r.json();
     if (d && d.code === 0 && d.data && d.data.b_3) {
-      cookie = 'buvid3=' + d.data.b_3 + '; buvid4=' + (d.data.b_4 || '');
+      return 'buvid3=' + d.data.b_3 + '; buvid4=' + (d.data.b_4 || '');
     }
   } catch (e) { console.log('spi failed: ' + String(e)); }
+  return '';
+}
 
-  const headers = {
-    'User-Agent': UA,
-    Referer: 'https://www.bilibili.com/',
-    Accept: 'application/json, text/plain, */*',
-    'Accept-Language': 'zh-CN,zh;q=0.9',
-    ...(cookie ? { Cookie: cookie } : {}),
-  };
+/* ---------- B站：AI 定向搜索 ---------- */
+async function fetchBilibiliAISearch(headers) {
+  const weekAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+  const seen = new Set();
+  const all = [];
+  for (const kw of AI_SEARCH_KW) {
+    try {
+      const url =
+        'https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=' +
+        encodeURIComponent(kw) + '&order=totalrank&page=1';
+      const r = await fetch(url, { headers });
+      const d = await r.json();
+      if (d.code !== 0 || !d.data || !Array.isArray(d.data.result)) {
+        console.log('search bad response for ' + kw + ' code=' + d.code);
+        continue;
+      }
+      for (const v of d.data.result) {
+        if (!v.bvid || seen.has(v.bvid)) continue;
+        const title = String(v.title || '').replace(/<[^>]+>/g, '');
+        if (!AI_TITLE_RE.test(title)) continue;
+        if ((v.pubdate || 0) < weekAgo) continue;
+        seen.add(v.bvid);
+        const pic = String(v.pic || '');
+        all.push({
+          title,
+          url: 'https://www.bilibili.com/video/' + v.bvid,
+          author: v.author || '',
+          cover: pic.startsWith('//') ? 'https:' + pic : pic,
+          views: v.play || 0,
+          likes: v.like || 0,
+          pubDate: (v.pubdate || 0) * 1000,
+        });
+      }
+    } catch (e) { console.log('search error for ' + kw + ': ' + String(e)); }
+  }
+  all.sort((a, b) => b.views - a.views);
+  return all.slice(0, 20).map((v, i) => ({ rank: i + 1, ...v }));
+}
 
-  for (const ep of [
+/* ---------- B站：全站热门（回退） ---------- */
+async function fetchBilibiliPopular(headers) {
+  const endpoints = [
     'https://api.bilibili.com/x/web-interface/popular?ps=20&pn=1',
     'https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all',
-  ]) {
+  ];
+  for (const ep of endpoints) {
     try {
       const r = await fetch(ep, { headers });
       const d = await r.json();
@@ -52,7 +90,7 @@ async function fetchBilibili() {
           pubDate: (v.pubdate || 0) * 1000,
         }));
       }
-      console.log('bilibili endpoint bad: ' + ep + ' code=' + d.code + ' ' + d.message);
+      console.log('bilibili endpoint bad: ' + ep + ' code=' + d.code);
     } catch (e) { console.log('bilibili endpoint error: ' + ep + ' ' + String(e)); }
   }
   return null;
@@ -96,9 +134,26 @@ async function fetchDouyin() {
 }
 
 (async () => {
-  const bili = await fetchBilibili();
+  const cookie = await getBiliCookie();
+  const headers = {
+    'User-Agent': UA,
+    Referer: 'https://www.bilibili.com/',
+    Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    ...(cookie ? { Cookie: cookie } : {}),
+  };
+
+  // B站：优先 AI 定向搜索，数量不足则回退全站热门
+  let bili = null;
+  try { bili = await fetchBilibiliAISearch(headers); } catch (e) { console.log('AI search failed: ' + String(e)); }
+  if (!bili || bili.length < 8) {
+    console.log('AI search insufficient (' + (bili ? bili.length : 0) + '), fallback to popular');
+    bili = await fetchBilibiliPopular(headers);
+  }
   if (bili) save('bilibili.json', { platform: 'bilibili', items: bili, fetchedAt: Date.now() });
+
   const dy = await fetchDouyin();
   if (dy) save('douyin.json', { platform: 'douyin', items: dy, fetchedAt: Date.now() });
+
   if (!bili) { console.error('BILIBILI FAILED'); process.exit(1); }
 })();
